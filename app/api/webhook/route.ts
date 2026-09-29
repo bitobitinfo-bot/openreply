@@ -1,10 +1,14 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
+import { drainDMQueue, isServerlessWorker } from "@/lib/queue/serverless-drain";
 import { prisma } from "@/lib/db/client";
 import {
   parseCommentEvents,
   verifyWebhookSignature,
 } from "@/lib/meta/webhook";
 import { processInstagramWebhook } from "@/lib/queue/process-webhook";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 
 export async function GET(request: NextRequest) {
@@ -63,6 +67,14 @@ export async function POST(request: NextRequest) {
 
   try {
     await processInstagramWebhook({ payload: payload as Parameters<typeof parseCommentEvents>[0], provider: 'META' });
+    // No always-on worker: send the queued DMs right after answering Meta.
+    if (isServerlessWorker()) {
+      after(async () => {
+        await drainDMQueue({ budgetMs: 45_000 }).catch((error) =>
+          console.error("[Serverless drain] webhook drain failed:", error)
+        );
+      });
+    }
     return NextResponse.json({ success: true });
   } catch {
     return NextResponse.json({ success: false, error: 'Webhook processing failed' }, { status: 500 });
